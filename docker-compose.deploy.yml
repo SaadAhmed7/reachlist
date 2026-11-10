@@ -1,0 +1,46 @@
+# Self-contained stack for the number checker. Deliberately shares nothing with
+# anything else already on the host: its own network, its own volumes, its own
+# database, and the app port published only where the operator chooses.
+name: numchecker
+
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: numchecker
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?set DB_PASSWORD}
+      POSTGRES_DB: numchecker
+    volumes:
+      - dbdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U numchecker"]
+      interval: 5s
+      retries: 20
+    networks: [internal]
+
+  app:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      db: { condition: service_healthy }
+    environment:
+      DATABASE_URL: postgresql://numchecker:${DB_PASSWORD}@db:5432/numchecker?schema=public
+      DEFAULT_REGION: ${DEFAULT_REGION:-PK}
+      TELEGRAM_API_ID: ${TELEGRAM_API_ID:-}
+      TELEGRAM_API_HASH: ${TELEGRAM_API_HASH:-}
+      # No proxy here: this host reaches Telegram directly.
+      COOKIE_SECURE: ${COOKIE_SECURE:-0}
+      TRUST_PROXY: ${TRUST_PROXY:-0}
+    volumes:
+      - waauth:/app/.wwebjs_auth
+    ports:
+      - "${BIND_ADDR:-127.0.0.1}:${APP_PORT:-8099}:3000"
+    networks: [internal]
+
+volumes:
+  dbdata:
+  waauth:
+
+networks:
+  internal:

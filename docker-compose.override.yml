@@ -1,0 +1,6 @@
+# Local override: host port 5432 is occupied by an unrelated container
+# (postgres-springboot), so ReachList's Postgres is published on 5433.
+# DATABASE_URL in .env matches this.
+services:
+  postgres:
+    ports: !override ["5433:5432"]

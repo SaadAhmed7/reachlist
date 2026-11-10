@@ -1,0 +1,11 @@
+Customer,Phone,Last Order
+Alice Fox,03001234567,2025-03-14
+Duplicate of Alice,+92 300 123 4567,2025-03-15
+Same again 00 prefix,00923001234567,2025-03-16
+Karachi landline,02135678901,2025-03-17
+US toll-free,+18005551212,2025-03-18
+Missing number,n/a,2025-03-19
+Excel mangled it,9.2300123457e+11,2025-03-20
+Too short,+92 300 12,2025-03-21
+Semicolon row;03121110003;2025-03-22
+Real mobile,03209876543,2025-03-23

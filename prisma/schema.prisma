@@ -1,0 +1,452 @@
+// ReachList — opt-in contact list hygiene pipeline
+//
+// Design note: there is deliberately no "is this number on WhatsApp" field that
+// gets populated by a lookup. Reachability is only ever learned from a real send
+// through the WhatsApp Cloud API (stage 2), and is stored on Reachability with
+// the raw provider code, because WhatsApp's 131026 is ambiguous.
+
+generator client {
+  provider = "prisma-client-js"
+  // Pinned so the container gets the right query engine: the build image must
+  // also have openssl installed, or Prisma guesses 1.1.x and the engine is
+  // missing at runtime.
+  binaryTargets = ["native", "debian-openssl-3.0.x"]
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------- tenancy
+
+model Account {
+  id        String   @id @default(cuid())
+  name      String
+  createdAt DateTime @default(now())
+
+  contacts Contact[]
+  lists    List[]
+  audits   AuditLog[]
+}
+
+// ---------------------------------------------------------------- contacts
+
+// One row per unique phone number per account. list_items point at these, so a
+// number that appears in five uploads is still one contact with one consent
+// history and one reachability record.
+model Contact {
+  id        String @id @default(cuid())
+  accountId String
+  account   Account @relation(fields: [accountId], references: [id], onDelete: Cascade)
+
+  // Always E.164, e.g. +923001234567. This is the natural key.
+  e164        String
+  countryCode String?
+  nationalNumber String?
+
+  // Latest known line classification, refreshed by the stage-2 Twilio Lookup pass.
+  lineType    LineType @default(UNKNOWN)
+  carrierName String?
+  lineCheckedAt DateTime?
+
+  optedOut   Boolean   @default(false)
+  optedOutAt DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  consents     ConsentRecord[]
+  listItems    ListItem[]
+  reachability Reachability[]
+
+  @@unique([accountId, e164])
+  @@index([accountId, lineType])
+  @@index([accountId, optedOut])
+}
+
+enum LineType {
+  UNKNOWN
+  MOBILE
+  LANDLINE
+  // Coarse VoIP, which is all libphonenumber can tell us offline. The Twilio
+  // pass refines it into FIXED_VOIP / NON_FIXED_VOIP later.
+  VOIP
+  FIXED_VOIP
+  NON_FIXED_VOIP
+  TOLL_FREE
+  PREMIUM
+  SHARED_COST
+  UAN
+  VOICEMAIL
+  PAGER
+  PERSONAL
+}
+
+// Every contact must have at least one of these. The importer refuses rows that
+// cannot produce one — that is the whole point of the consent gate.
+model ConsentRecord {
+  id        String  @id @default(cuid())
+  contactId String
+  contact   Contact @relation(fields: [contactId], references: [id], onDelete: Cascade)
+
+  source     String   // e.g. "checkout_form", "in_store_signup", "web_form_v2"
+  collectedAt DateTime
+  evidence   String?  // free text: form id, receipt no, IP, whatever you hold
+  listId     String?  // which upload this consent arrived with
+
+  createdAt DateTime @default(now())
+
+  @@index([contactId, collectedAt])
+}
+
+// ---------------------------------------------------------------- uploads
+
+model List {
+  id        String  @id @default(cuid())
+  accountId String
+  account   Account @relation(fields: [accountId], references: [id], onDelete: Cascade)
+
+  name          String
+  originalFilename String
+  status        ListStatus @default(PENDING)
+
+  // Column mapping resolved at upload time, persisted so a re-run is reproducible.
+  columnMap Json
+
+  totalRows     Int @default(0)
+  processedRows Int @default(0)
+  acceptedRows  Int @default(0)
+  rejectedRows  Int @default(0)
+  duplicateRows Int @default(0)
+
+  error     String?
+  createdAt DateTime  @default(now())
+  startedAt DateTime?
+  finishedAt DateTime?
+
+  items ListItem[]
+
+  @@index([accountId, createdAt])
+}
+
+enum ListStatus {
+  PENDING
+  PROCESSING
+  COMPLETED
+  FAILED
+}
+
+// One row per CSV line, kept even when rejected so the user can download a
+// rejects file and fix their source data.
+model ListItem {
+  id     String @id @default(cuid())
+  listId String
+  list   List   @relation(fields: [listId], references: [id], onDelete: Cascade)
+
+  rowNumber Int
+  rawPhone  String
+  rawRow    Json
+
+  status       ItemStatus
+  rejectReason String?
+
+  contactId String?
+  contact   Contact? @relation(fields: [contactId], references: [id], onDelete: SetNull)
+
+  createdAt DateTime @default(now())
+
+  @@index([listId, status])
+  @@index([listId, rowNumber])
+}
+
+enum ItemStatus {
+  ACCEPTED
+  DUPLICATE_IN_FILE
+  INVALID_NUMBER
+  UNPARSEABLE
+  MISSING_CONSENT
+  OPTED_OUT
+}
+
+// ---------------------------------------------------------------- reachability
+
+// Written by the stage-2 send pipeline from Cloud API status webhooks, and —
+// since `npm run wa:check` was added — by the unsanctioned WhatsApp Web probe.
+// Always check providerCode before trusting a row: "wweb:*" is a probe result
+// from an automated WhatsApp Web session, not a delivery fact, and it cannot
+// tell you whether the registered account still belongs to the person who
+// consented. Cloud API webhook rows carry the raw numeric provider code.
+model Reachability {
+  id        String  @id @default(cuid())
+  contactId String
+  contact   Contact @relation(fields: [contactId], references: [id], onDelete: Cascade)
+
+  channel Channel
+  state   ReachState
+
+  // Raw provider detail. For WhatsApp this is the Cloud API error code, e.g.
+  // "131026" — which means undeliverable, NOT necessarily "has no WhatsApp".
+  providerCode   String?
+  providerDetail String?
+
+  observedAt DateTime @default(now())
+  expiresAt  DateTime?
+
+  @@unique([contactId, channel])
+  @@index([channel, state])
+}
+
+enum Channel {
+  WHATSAPP
+  TELEGRAM
+  SMS
+}
+
+enum ReachState {
+  UNKNOWN
+  REACHABLE
+  UNDELIVERABLE
+  BLOCKED
+}
+
+// ---------------------------------------------------------------- audit
+
+model AuditLog {
+  id        String  @id @default(cuid())
+  accountId String
+  account   Account @relation(fields: [accountId], references: [id], onDelete: Cascade)
+
+  actor  String
+  action String
+  target String?
+  meta   Json?
+
+  createdAt DateTime @default(now())
+
+  @@index([accountId, createdAt])
+}
+
+// ====================================================================
+// Credit-metered checker (admin panel + user panel)
+//
+// Separate from the importer's Account/Contact tree above. The importer is a
+// per-tenant data pipeline; this is a metered service with paying users, and
+// conflating them would couple two things that change for different reasons.
+// ====================================================================
+
+model User {
+  id           String  @id @default(cuid())
+  email        String  @unique
+  passwordHash String
+  name         String?
+  role         Role    @default(USER)
+
+  /// Denormalized running balance. Never written directly — only inside the
+  /// same transaction that appends a CreditTx, so the ledger stays the truth.
+  credits   Int     @default(0)
+  active    Boolean @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  sessions UserSession[]
+  ledger   CreditTx[]    @relation("ledgerOwner")
+  issued   CreditTx[]    @relation("ledgerActor")
+  checks   CheckRecord[]
+  batches  CheckBatch[]
+
+  @@index([active, createdAt])
+}
+
+enum Role {
+  ADMIN
+  USER
+}
+
+model UserSession {
+  id     String @id @default(cuid())
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  /// SHA-256 of the cookie value. A database leak must not hand over live logins.
+  tokenHash String   @unique
+  expiresAt DateTime
+  userAgent String?
+  createdAt DateTime @default(now())
+
+  @@index([userId, expiresAt])
+}
+
+/// Append-only ledger. Every balance change in the system is one row here, so
+/// "where did my credits go" is always answerable.
+model CreditTx {
+  id     String @id @default(cuid())
+  userId String
+  user   User   @relation("ledgerOwner", fields: [userId], references: [id], onDelete: Cascade)
+
+  /// Positive for top-ups and refunds, negative for usage.
+  delta        Int
+  balanceAfter Int
+  kind         TxKind
+  note         String?
+
+  /// Who caused it. Null when the user spent their own credits.
+  actorId String?
+  actor   User?   @relation("ledgerActor", fields: [actorId], references: [id], onDelete: SetNull)
+
+  createdAt DateTime @default(now())
+
+  @@index([userId, createdAt])
+}
+
+enum TxKind {
+  /// Admin added credit after payment was received outside the system.
+  TOPUP
+  /// A lookup was charged.
+  DEBIT
+  /// A charged lookup could not be answered, so the credit was given back.
+  REFUND
+  /// Manual correction.
+  ADJUST
+}
+
+/// One of the operator's own WhatsApp/Telegram logins, shared by all users.
+model ProviderAccount {
+  id      String  @id @default(cuid())
+  channel Channel
+  label   String
+
+  /// Shown once linked, for telling accounts apart in the admin list.
+  identifier String?
+
+  /// Telegram's StringSession, so the server reconnects without a fresh QR.
+  /// WhatsApp persists its own auth to .wwebjs_auth and leaves this null.
+  sessionData String?
+
+  status  ProviderStatus @default(NEW)
+  lastError String?
+
+  /// Taken out of rotation without being deleted — the usual response to a
+  /// account that starts getting throttled.
+  enabled Boolean @default(true)
+
+  lastConnectedAt DateTime?
+  lastUsedAt      DateTime?
+  /// Lookups served, for spreading load and spotting the account about to burn.
+  lookupCount     Int       @default(0)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  checks CheckRecord[]
+
+  @@index([channel, enabled, status])
+}
+
+enum ProviderStatus {
+  /// Created but never linked.
+  NEW
+  LINKING
+  READY
+  FAILED
+  /// Logged out, or the link was revoked from the phone.
+  DISCONNECTED
+}
+
+/// One billable lookup. Kept so a user can see what they were charged for, and
+/// so a disputed charge can be traced to a provider account and a moment.
+model CheckRecord {
+  id     String @id @default(cuid())
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  channel Channel
+  e164    String
+  verdict String
+  /// Telegram's activity answer, when it gave one.
+  lastSeen Json?
+
+  /// What this cost. Zero when the lookup failed and was not charged.
+  credits Int @default(1)
+
+  providerId String?
+  provider   ProviderAccount? @relation(fields: [providerId], references: [id], onDelete: SetNull)
+
+  /// Set when this lookup came from an uploaded file rather than a single check.
+  batchId String?
+  batch   CheckBatch? @relation(fields: [batchId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+
+  @@index([userId, createdAt])
+  @@index([e164, channel])
+  @@index([batchId])
+}
+
+/// One CSV a user uploaded. Exists so every number they submit is kept against
+/// their account — including the rows that were never looked up, which is what
+/// makes "why was I charged 40 for a 60-row file" answerable.
+model CheckBatch {
+  id     String @id @default(cuid())
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  name     String
+  /// Channels requested for this batch, e.g. ["WHATSAPP","TELEGRAM"].
+  channels Json
+
+  totalRows Int @default(0)
+  /// Rows that actually needed a lookup, after invalid/duplicate/impossible.
+  checkable Int @default(0)
+  /// Lookups completed so far, across all channels.
+  done      Int @default(0)
+
+  creditsSpent    Int @default(0)
+  creditsRefunded Int @default(0)
+
+  /// Rows found on at least one requested channel. Kept as a count because the
+  /// numbers that were not found are deleted once the run ends.
+  matched Int @default(0)
+  /// Rows discarded for not being on any requested channel. The count survives
+  /// so a charge is still explainable; the numbers themselves do not.
+  discarded Int @default(0)
+
+  status BatchStatus @default(RUNNING)
+  error  String?
+
+  createdAt  DateTime  @default(now())
+  finishedAt DateTime?
+
+  items   BatchItem[]
+  records CheckRecord[]
+
+  @@index([userId, createdAt])
+}
+
+enum BatchStatus {
+  RUNNING
+  DONE
+  STOPPED
+  FAILED
+}
+
+/// One uploaded row, kept verbatim with whatever each channel answered.
+model BatchItem {
+  id      String     @id @default(cuid())
+  batchId String
+  batch   CheckBatch @relation(fields: [batchId], references: [id], onDelete: Cascade)
+
+  rowNumber   Int
+  raw         String
+  e164        String?
+  countryCode String?
+  /// OK | INVALID | DUPLICATE | IMPOSSIBLE — the offline verdict.
+  status      String
+  reason      String?
+
+  /// { "WHATSAPP": { verdict, reason, lastSeen? }, ... }
+  results Json?
+
+  @@index([batchId, rowNumber])
+}

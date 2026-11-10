@@ -1,0 +1,22 @@
+node_modules
+.next
+.env
+.env.*
+!.env.example
+*.log
+uploads/
+
+# whatsapp-web.js session (a logged-in WhatsApp account — never commit)
+.wwebjs_auth/
+.wwebjs_cache/
+
+# Verification builds
+.next-verify/
+
+# Local test credentials
+LOCAL-LOGINS.md
+CLIENT-ACCESS.md
+
+# OS and editor noise
+.DS_Store
+.idea/

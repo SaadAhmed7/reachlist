@@ -1,0 +1,11 @@
+node_modules
+.next
+.git
+.env
+.env.local
+uploads
+.wwebjs_auth
+.wwebjs_cache
+tsconfig.tsbuildinfo
+.idea
+*.log

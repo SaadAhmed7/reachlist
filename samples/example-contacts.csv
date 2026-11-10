@@ -1,0 +1,9 @@
+Mobile Number,Opt-In Source,Opt-In Date,Consent Evidence,Full Name,Notes
+"0300 123 4567",checkout_form,2025-03-14,order#8812,Ayesha Khan,vip
+03001234567,checkout_form,2025-03-14,order#8813,Ayesha Khan,duplicate of row 2
++92 321 7654321,in_store_signup,14/03/2025,receipt#4471,Bilal Ahmed,
+0512345678,web_form_v2,2025-01-02,form#221,Landline Larry,
++92 333​1112222,web_form_v2,2025-06-30,form#980,Unicode Umar,nbsp + zero-width
+not a number,web_form_v2,2025-01-02,form#222,Junk Row,
++923005556666,,,,No Consent Nadia,blank consent columns
++14155552671,web_form_v2,2025-08-01,form#1002,International Ivy,
